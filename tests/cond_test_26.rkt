@@ -1,0 +1,8 @@
+(let ([x 1])
+(let ([y 2])
+(let ([z (if (if (not (< x 1))
+(not (eq? x 0))
+(eq? x 2))
+(not (eq? y 2))
+(not (eq? y 10)))])
+  (if z (+ 2 3) (+ 3 4)))))

@@ -1,0 +1,2 @@
+ (define (negate2 [x : Integer]) : Integer (- 0 x))
+ (negate 42)

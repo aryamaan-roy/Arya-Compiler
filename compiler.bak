@@ -1,0 +1,582 @@
+#lang racket
+(require racket/set racket/stream)
+(require graph)
+(require racket/dict)
+(require racket/fixnum)
+(require "interp-Lint.rkt")
+(require "interp-Lvar.rkt")
+(require "interp-Cvar.rkt")
+(require "type-check-Lvar.rkt")
+(require "type-check-Cvar.rkt")
+(require "utilities.rkt")
+(require "interp.rkt")
+(require "graph-printing.rkt")
+(require "priority_queue.rkt")
+(provide (all-defined-out))
+
+
+;; uniquify : R1 -> R1
+(define (uniquify p)
+  (define (uniquify-inner env e)
+    (match e
+      [(Var x) (Var (dict-ref env x))]
+      [(Int n) (Int n)]
+      [(Let x e body)
+       (let ([new-env (dict-set env x (gensym x))])
+         (define uniquified_variable (dict-ref new-env x) )
+         (define uniquified_expression (uniquify-inner env e))
+         (define uniquified_body (uniquify-inner new-env body))
+         (Let uniquified_variable uniquified_expression uniquified_body)
+         )]
+      [(Prim op es) (Prim op (for/list ([e es]) (uniquify-inner env e)))]))
+  (match p
+    [(Program '() e) (Program '() (uniquify-inner '() e))]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (is-atm? p)
+  (match p
+    [(Int n) #t]
+    [(Var x) #t]
+    [(Prim 'read '()) #t]
+    [(Let x e body) (and (is-atm? x) (is-atm? e) (is-atm? body))]
+    [(Prim '+ (list e1 e2)) (and (or (Int? e1) (Var? e1) (and (Let? e1) (is-atm? e1))) (or (Int? e2) (Var? e2) (and (Let? e2) (is-atm? e2))))]
+    [(Prim '- (list e1 e2)) (and (or (Int? e1) (Var? e1) (and (Let? e1) (is-atm? e1))) (or (Int? e2) (Var? e2) (and (Let? e2) (is-atm? e2))))]
+    [else #f]
+    ))
+
+
+(define (rco-atm env p)
+  (if (is-atm? p) p
+      (match p
+        [(Int n) (Return (Int n))]
+        [(Var x) (Return (Var x))]
+        [(Prim 'read '()) (Return p)]
+        [(Let x e body)
+         (define new-exp
+           (if (is-atm? e) e (rco-atm env e)))
+         (define new-body
+           (if (is-atm? body) body (rco-atm env body)))
+         (Let x new-exp new-body)]
+        [(Prim '+ (list e1 e2))
+         (if (and (is-atm? e1) (is-atm? e2))
+             (let ([var-here (gensym "hemlu")] [var-here-2 (gensym "hemlu")]) (Let var-here e2 (Let var-here-2 e1 (Prim '+ (list (Var var-here) (Var var-here-2))))))
+             (if (or (is-atm? e1) (is-atm? e2))
+                 (if (is-atm? e1)
+                     (let ([var-here (gensym "hemlu")] [var-here-2 (gensym "hemlu")]) (Let var-here e1 (Let var-here-2 (rco-atm env e2) (Prim '+ (list (Var var-here) (Var var-here-2))))))
+                     (let ([var-here (gensym "hemlu")] [var-here-2 (gensym "hemlu")]) (Let var-here e2 (Let var-here-2 (rco-atm env e1) (Prim '+ (list (Var var-here) (Var var-here-2))))))
+                     )                 
+                 (let ([var-here (gensym "ans")] [var-here-2 (gensym "ans")]) (Let var-here (rco-exp env e1) (Let var-here-2 (rco-exp env e2) (Prim '+ (list (Var var-here) (Var var-here-2))))
+                                                                                   ))))]
+        [(Prim '- (list e1 e2))
+         (if (and (is-atm? e1) (is-atm? e2))
+             (let ([var-here (gensym "hemlu")] [var-here-2 (gensym "hemlu")]) (Let var-here e1 (Let var-here-2 e2 (Prim '- (list (Var var-here) (Var var-here-2))))))
+             (if (or (is-atm? e1) (is-atm? e2))
+                 (if (is-atm? e1)
+                     (let ([var-here (gensym "hemlu")] [var-here-2 (gensym "hemlu")]) (Let var-here e1 (Let var-here-2 (rco-atm env e2) (Prim '- (list (Var var-here) (Var var-here-2))))))
+                     (let ([var-here (gensym "hemlu")] [var-here-2 (gensym "hemlu")]) (Let var-here e2 (Let var-here-2 (rco-atm env e1) (Prim '- (list (Var var-here-2) (Var var-here))))))
+                     )                 
+                 (let ([var-here (gensym "ans")] [var-here-2 (gensym "ans")]) (Let var-here (rco-exp env e1) (Let var-here-2 (rco-exp env e2) (Prim '- (list (Var var-here) (Var var-here-2))))
+                                                                                   ))))]
+        [(Prim '- (list e1))
+         (rco-exp '() (Prim '- (list (Int 0) e1)))]        
+        )))
+
+(define (rco-exp env p)
+  (match p
+    [(Int n) p]
+    [(Var x) p]
+    [(Let x e body) (Let x (rco-exp env e) (rco-exp env body))]
+    [(Prim op es) (rco-atm env p)]))
+
+(define (remove-complex-opera* p)
+  (match p
+    [(Program '() e) (Program '() (rco-exp '() e))]))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; explicate-control : R1 -> C0
+
+(define (explicate-tail e)
+  (match e
+    [(Var x) (Return (Var x))]
+    [(Int n) (Return (Int n))]
+    [(Let x rhs body) (define new-body (explicate-tail body))
+                      (explicate-assign rhs x new-body)]
+    [(Prim op es) (Return (Prim op es))]
+    [else (error "explicate_tail unhandled case" e)]))
+
+
+(define (explicate-assign e x cont)
+  (match e
+    [(Var y) (Seq (Assign (Var x) (Var y) ) cont)]
+    [(Int n) (Seq (Assign (Var x) (Int n)) cont)]
+    [(Let y rhs body) (define new-body (explicate-assign body x cont))
+                      (explicate-assign rhs y new-body)]
+    [(Prim op es) (Seq (Assign (Var x) (Prim op es)) cont)]
+    [else (error "explicate_assign unhandled case" e)]))
+
+
+(define (explicate-control p)
+  (define (tidy-func info body)
+    (CProgram info `((start . , (explicate-tail body)))))
+  (match p
+    [(Program info body) (tidy-func info body)]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;; The following is the code for select-instructions
+
+(define (figure-it-out p)
+  (match p
+    [(Int p) (Imm p)]
+    [(Var p) (Var p)]
+    [else (error "error in figure-it-out")]))
+
+(define (select-inner-func-2 lst p)
+  (match p
+    [(Assign x body)
+     (append lst (match body
+                   [(Int e1) (list (Instr 'movq (list (Imm e1) x)))]
+                   [(Var y) (list (Instr 'movq (list (Var y) x)))]
+                   [(Prim '+ (list e1 e2))
+                    (list (Instr 'movq (list (figure-it-out e1) x )) (Instr 'addq (list (figure-it-out e2) x ))
+                          )]
+                   [(Prim '- (list e1 e2))
+                    (list (Instr 'movq (list (figure-it-out e1) x )) (Instr 'subq (list (figure-it-out e2) x ))
+                          )]
+                   [(Prim '- (list e1))
+                    (if (Var? e1)
+                        (list (Instr 'negq (list e1)) (Instr 'movq (list e1 x)))
+                        (list (Instr 'movq (list (Imm (Int-value e1)) x)) (Instr 'negq (list x)) )
+                        )
+                    ]
+                   [(Prim 'read '()) (list (Callq 'read_int 0) (Instr 'movq (list (Reg 'rax) x)))]
+                   ))]
+    [(Var x) (append lst (list (Instr 'movq (list (Var x) (Reg 'rax))) (Jmp 'conclusion)))]
+    [(Int x) (append lst (list (Instr 'movq (list (Imm x) (Reg 'rax))) (Jmp 'conclusion)))]
+    [(Prim '+ (list e1 e2))
+     (append lst (list (Instr 'movq (list (figure-it-out e1) (Reg 'rax ))) (Instr 'addq (list (figure-it-out e2) (Reg 'rax) ))
+                       (Jmp 'conclusion)))]
+    [(Prim '- (list e1 e2))
+     (append lst (list (Instr 'movq (list (figure-it-out e1) (Reg 'rax) )) (Instr 'subq (list (figure-it-out e2) (Reg 'rax) ))
+                       (Jmp 'conclusion)))]
+    [(Prim '- (list e1))
+     (if (Var? e1)
+         (append lst (list (Instr 'negq (list e1)) (Instr 'movq (list e1 (Reg 'rax))) (Jmp 'conclusion)))
+         (append lst (list (Instr 'movq (list (Imm (Int-value e1)) (Reg 'rax))) (Instr 'negq (list (Reg 'rax))) (Jmp 'conclusion) ))
+         )
+     ]
+    [(Prim 'read '()) (append lst (list (Callq 'read_int 0) (Jmp 'conclusion)))]
+    ))
+   
+(define (select-inner-func lst body)
+  (match body
+    [(Seq assign_t second_seq) (append lst (select-inner-func-2 lst assign_t) (select-inner-func lst second_seq))]
+    [(Return body) (append lst (select-inner-func-2 lst body))]
+    ))
+         
+(define (select-instructions p)
+  (match p
+    [(CProgram info body )
+     (X86Program info (map (lambda (code) (cons (car code) (Block '() (select-inner-func '() (cdr code))))) body))]
+    ))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (inner_live_3 ins lst)
+  (define caller_s (set (Reg 'rax) (Reg 'rcx) (Reg 'rdx) (Reg 'rsi) (Reg 'rdi) (Reg 'r8) (Reg 'r9) (Reg 'r10) (Reg 'r11)))
+  (define arg_passing (set (Reg 'rdi) (Reg 'rsi) (Reg 'rdx) (Reg 'rcx) (Reg 'r8) (Reg 'r9)))
+  (define set_last (list-ref lst (- (length lst) 1)))
+  (match ins
+    [(Instr 'movq (list (Imm e1) e2)) (if (set-member? set_last e2)
+                                    (let ([set_here (set-union (set-subtract set_last (set e2)) )]) (append lst (list set_here)))
+                                    lst)]
+    [(Instr 'addq (list (Imm e1) e2)) (append lst (list (set-union set_last (set e2))))]
+    [(Instr 'subq (list (Imm e1) e2)) (append lst (list (set-union set_last (set e2))))]
+    [(Instr 'negq (list (Imm e1))) lst]
+    [(Instr 'movq (list e1 e2))
+     (if (set-member? set_last e2)
+         (let ([set_here (set-union (set-subtract set_last (set e2)) (set e1))]) (append lst (list set_here)))
+         (append lst (list (set-union set_last (set e1)))))]
+    
+    [(Instr 'addq (list e1 e2)) (append lst (list (set-union set_last (set e1 e2))))]
+    [(Instr 'subq (list e1 e2)) (append lst (list (set-union set_last (set e1 e2))))]
+    [(Instr 'negq (list e1)) (append lst (list (set-union set_last (set e1))))]
+    [(Jmp 'conclusion) (append lst (list (set-union set_last (set (Reg 'rax) (Reg 'rsp)))))]
+    [(Callq 'read_int e1) (append lst (list (set-subtract set_last caller_s)))]
+    [else (append lst (list (set-union (set 'nahi) set_last)))]))
+  
+(define (inner_live_2 body)
+  ;; We need to make a list of sets, initally list will have 1 set ie/ {phie}
+  (define my_set (set))
+  (define lst (list my_set))
+  (for ([e (in-list (reverse body))]) (set! lst (inner_live_3 e lst)))
+  lst
+  )
+
+(define (inner_live body)
+  (match body
+    [(Block info inner_body) (Block (dict-set info 'liveness (inner_live_2 inner_body)) inner_body)]))
+  
+
+(define (uncover_live p)
+  (match p
+    [(X86Program info body) (let ([a (inner_live (cdr (car body)))]) a )]))
+    
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+(define (inner_build_interference3 curr_instr prev_set next_set grph)
+  (define set_1 next_set)
+  (match curr_instr
+    [(Instr op (list (Imm e1) e2))
+     (for ([v1 (in-set set_1)])
+       (if (equal? v1 e2) null
+       (add-edge! grph v1 e2)))
+     grph]
+    [(Instr 'movq (list e1 e2))
+     (for ([v1 (in-set set_1)])
+       (if (or (equal? v1 e1) (equal? v1 e2))
+           ; then
+           null
+           ; else
+           (add-edge! grph v1 e2)
+           ) 
+       )
+     grph
+     ]
+    [(Instr op (list e1 e2))
+     (for ([v1 (in-set set_1)])
+       (if (equal? v1 e2) null
+       (add-edge! grph v1 e2)))
+     grph]
+    [else grph]
+    ))
+           
+
+(define (inner_build_interference2 lst_set lst_instr)
+  (define myg (undirected-graph (list (list (Reg 'rax) (Reg 'rsp)))))
+  (define itr 0)
+  (for ([e (in-list lst_instr)])
+ 
+    (set! myg (inner_build_interference3 e (list-ref lst_set itr) (list-ref lst_set (+ itr 1)) myg))
+    (set! itr (+ itr 1)))
+  myg
+  )
+
+(define (inner_build_interference p)
+  (match p
+    [(Block info body) (inner_build_interference2 (reverse (dict-ref info 'liveness )) body)]))
+  
+
+(define (build_interference p)
+  (match p
+    [(X86Program info body)
+     (X86Program
+      (dict-set info 'conflicts (inner_build_interference (uncover_live p)))
+      (uncover_live p))]
+    ))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(struct pq_node (Vertex Set))
+
+(define (pq_cmp node_1 node_2)
+  (define l1 (set-count (pq_node-Set node_1)))
+  (define l2 (set-count (pq_node-Set node_2)))
+  (if (> l1 l2)
+      #t
+      #f)
+  )
+
+(define (get_lowest_positive set_here)
+  (set! set_here (sort (set->list set_here) <))
+  (define output 0)
+  (define flag 1)
+  (for ([e (in-range 50)])
+    (if (set-member? set_here e)
+        null
+        (if (equal? flag 1)
+            (begin (set! output e) (set! flag 0))
+            (set! flag 0)
+            )))
+  output)
+
+(define (color-graph grph lst_vertices)
+  (define mypq (make-pqueue pq_cmp))
+
+  (set! lst_vertices (remove (Reg 'rax) lst_vertices))
+  (set! lst_vertices (remove (Reg 'rsp) lst_vertices))
+
+  (define vertex_to_handle
+    (for/list ([e (in-list lst_vertices)])
+      (cons e (pqueue-push! mypq (pq_node e (set) )))))
+  
+  (define vertex_to_register `())
+  (set! vertex_to_register (dict-set vertex_to_register (Reg 'rax) -1))
+  (set! vertex_to_register (dict-set vertex_to_register (Reg 'rsp) -2))
+  
+  (define neigh_rax (get-neighbors grph (Reg 'rax)))
+  (set! neigh_rax (remove (Reg 'rsp) neigh_rax))
+
+  (for ([e (in-list neigh_rax) ])
+    (define handle_here (dict-ref vertex_to_handle e))
+    (set-node-key! handle_here (pq_node e (set -1)))
+    (pqueue-decrease-key! mypq handle_here)
+    )
+  
+  (define neigh_rsp (get-neighbors grph (Reg 'rsp)))
+  (set! neigh_rsp (remove (Reg 'rax) neigh_rsp))
+  (for ([e (in-list neigh_rsp) ])
+    (define handle_here (dict-ref vertex_to_handle e))
+    (set-node-key! handle_here (pq_node e (set-union (pq_node-Set (node-key handle_here)) (set -2))))
+    (pqueue-decrease-key! mypq handle_here)
+    )
+
+  (remove-vertex! grph (Reg 'rax))
+  (remove-vertex! grph (Reg 'rsp))
+  
+  (for ([index (in-range (length lst_vertices))])
+    (define highest_struct (pqueue-pop! mypq))
+    (define curr_color (get_lowest_positive (pq_node-Set highest_struct)))
+    (for ([v (in-list (get-neighbors grph (pq_node-Vertex highest_struct)))])
+         (define handle_here (dict-ref vertex_to_handle v))
+          (set-node-key! handle_here (pq_node v (set-union (pq_node-Set (node-key handle_here)) (set curr_color))))
+           (pqueue-decrease-key! mypq handle_here))
+    (set! vertex_to_register (dict-set vertex_to_register (pq_node-Vertex highest_struct) curr_color))
+    (remove-vertex! grph (pq_node-Vertex highest_struct))
+    )
+  vertex_to_register  
+  )
+
+(define (outer_color_graph p)
+  (define new_p (build_interference p))
+  (match new_p
+    [(X86Program info body) (define grph (dict-ref info 'conflicts))
+                            (define lst_vertices (get-vertices (dict-ref info 'conflicts)))
+                            (X86Program
+                             (dict-set info 'graph_colors (color-graph grph lst_vertices))
+                             (list (cons 'start body)))]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;; Assign Homes Task
+
+(define (assign-stack internal_list x)
+  (match x
+    [(Imm y) x]
+    [(Var y) (define new_y 'timepass)
+             (for ([e (in-list internal_list)])
+               (if (equal? (car e) (Var y))
+                   (set! new_y (cdr e))
+                   null))
+             (if (Reg? new_y)
+                 new_y
+                 (Deref 'rbp new_y))
+             ]
+    [else x]))
+
+(define (internal-assign-homes-2 internal_list body)
+  (match body
+    [(Instr op (list l1 l2)) (Instr op (list (assign-stack internal_list l1) (assign-stack internal_list l2)))]
+    [(Instr op (list l1)) (Instr op (list (assign-stack internal_list l1)))]
+    [else body]))
+
+(define (internal-assign-homes internal_list body)
+  (match body
+    [(Block e1 e2) (list (cons 'start (Block e1 (for/list ([e (in-list e2)]) (internal-assign-homes-2 internal_list e)))))])
+  )                    
+
+
+(define (callee_size p)
+  (define lst_mapping_callee `())
+  (set! lst_mapping_callee (dict-set lst_mapping_callee -2 8))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee -1 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 0 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 1 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 2 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 3 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 4 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 5 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 6 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 7 8))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 8 8))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 9 8))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 10 8))
+  (define count 0)
+  (define graph_colors_here (match p
+    [(X86Program info body) (define graph_colors_here (dict-ref info 'graph_colors))
+                            graph_colors_here]))
+  (for ([e (in-list graph_colors_here)])
+    (if (and (not (equal? (cdr e) -1)) (not (equal? (cdr e) -2)) (< (cdr e) 11))
+        (set! count (+ count (dict-ref lst_mapping_callee (cdr e))))
+        null))
+  (set! count (align count 16))
+  count
+  )
+                          
+
+(define (assign-homes p)
+  (define new_program (outer_color_graph p))
+  (define count (callee_size new_program))
+  (define register_lst (list (Reg 'rcx) (Reg 'rdx) (Reg 'rsi) (Reg 'rdi) (Reg 'r8) (Reg 'r9) (Reg 'r10) (Reg 'rbx) (Reg 'r12) (Reg 'r13) (Reg 'r14)))
+  (match new_program
+    [(X86Program info body)
+     (define graph_colors (dict-ref info 'graph_colors))
+       (set! graph_colors (remove (cons (Reg 'rax) -1) graph_colors))
+       (set! graph_colors (remove (cons (Reg 'rsp) -2) graph_colors))
+     (define internal_list
+       (for/list ([hemlu (in-list graph_colors)])
+         (if (< (cdr hemlu) 11)
+             (cons (car hemlu) (list-ref register_lst (cdr hemlu)))
+             (begin
+               (set! count (- count 8)) (cons (car hemlu) count)))))
+
+     (X86Program info (internal-assign-homes internal_list (cdr (car body))))]))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define global-lst '())
+
+
+(define (internal-patch-instructions-2 lst x)
+  (match x
+    [(Instr 'movq (list (Deref reg1 int1) (Deref reg2 int2)))
+     (if (equal? (Deref reg1 int1) (Deref reg2 int2)) null
+         (set! global-lst (append global-lst
+                              (list (Instr 'movq (list (Deref reg1 int1) (Reg 'rax)))
+                                    (Instr 'movq (list (Reg 'rax) (Deref reg2 int2))))))) 
+     x
+     ]
+    [(Instr com (list (Deref reg1 int1) (Deref reg2 int2)))
+     (set! global-lst (append global-lst
+                              (list (Instr 'movq (list (Deref reg1 int1) (Reg 'rax)))
+                                    (Instr com (list (Reg 'rax) (Deref reg2 int2)))))) x]
+    [(Instr 'movq (list e1 e2))
+     (if (equal? e1 e2) null
+         (set! global-lst (append global-lst (list x)))) 
+     x
+     ]
+    [else (set! global-lst (append global-lst (list x))) x])) 
+
+(define (internal-patch-instructions lst body)
+  (match body
+    [(Block e1 e2)
+     (for/list ([e (in-list e2)]) (internal-patch-instructions-2 lst e))
+     (Block e1 global-lst)])
+  )
+
+(define (get-block body)
+  (list (cons 'start (internal-patch-instructions '() (cdr (car body))))))
+
+(define (patch-instructions p)
+  (define count 0)
+  (set! global-lst empty)
+  (match p
+    [(X86Program info body) (X86Program info (get-block body))]
+    ))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (concluding_block set_output stack_size)
+  (define my-list '())
+  (if (equal? stack_size 0)
+      null
+      (set! my-list (append my-list (list (Instr 'addq (list (Imm stack_size) (Reg 'rsp)))))))
+  (for ([e (in-list (reverse set_output))])
+    (set! my-list (append my-list (list e))))
+  (set! my-list (append my-list (list (Instr 'popq (list (Reg 'rbp))) (Retq))))
+  (Block '() my-list))
+
+
+(define (main_block info graph_colors_here lst_mapping_callee stack_size)
+  (define register_lst (list (Reg 'rcx) (Reg 'rdx) (Reg 'rsi) (Reg 'rdi) (Reg 'r8) (Reg 'r9) (Reg 'r10) (Reg 'rbx) (Reg 'r12) (Reg 'r13) (Reg 'r14)))
+  (define lst_ins_main (list
+                        (Instr 'pushq (list (Reg 'rbp)))
+                        (Instr 'movq (list (Reg 'rsp) (Reg 'rbp)))
+                        ))
+  (define set_unique_push_ins (set))
+  
+  (for ([e (in-list graph_colors_here)])
+    (if (and (< (cdr e) 11) (equal? (dict-ref lst_mapping_callee (cdr e)) 8) (not (equal? (cdr e) -1)) (not (equal? (cdr e) -2)))
+        (begin
+          (set! set_unique_push_ins (set-union set_unique_push_ins (set (Instr 'pushq (list (list-ref register_lst (cdr e))))))))
+        null
+        )
+    )
+  (define set_output (set->list set_unique_push_ins))
+  (set! lst_ins_main (append lst_ins_main set_output))
+  (if (equal? stack_size 0)
+      null
+      (set! lst_ins_main (append lst_ins_main (list (Instr 'subq (list (Imm stack_size) (Reg 'rsp)))))))  
+  (set! lst_ins_main (append lst_ins_main (list (Jmp 'start))))
+  (cons set_output (Block '() lst_ins_main)))
+
+
+(define (get-stack-size graph_colors_here lst_mapping p)
+  (define total_spilled 0)
+  (define total_callee 0)
+  (for ([e (in-list graph_colors_here)])
+    (if (> (cdr e) 10)
+        (set! total_spilled (+ total_spilled 8))
+        (set! total_callee (+ total_callee (dict-ref lst_mapping (cdr e))))))
+  (define size (- (align (+ total_spilled total_callee) 16) total_callee));
+  size)
+
+
+(define (prelude-and-conclusion p)
+  (define lst_mapping_callee `())
+  (set! lst_mapping_callee (dict-set lst_mapping_callee -2 8))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee -1 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 0 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 1 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 2 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 3 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 4 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 5 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 6 0))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 7 8))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 8 8))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 9 8))
+  (set! lst_mapping_callee (dict-set lst_mapping_callee 10 8))
+  (match p
+    [(X86Program info body)
+     (define graph_colors_here (dict-ref info 'graph_colors))
+     (define size (get-stack-size graph_colors_here lst_mapping_callee p))
+     (define output_main (main_block info graph_colors_here lst_mapping_callee size))
+     (X86Program info (append body (list (cons 'main (cdr output_main))
+                                         (cons 'conclusion (concluding_block (car output_main ) size))
+                                         )))]))
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Define the compiler passes to be used by interp-tests and the grader
+;; Note that your compiler file (the file that defines the passes)
+;; must be named "compiler.rkt"
+(define compiler-passes
+  `( 
+     ;; Uncomment the following passes as you finish them.
+     ("uniquify" ,uniquify ,interp-Lvar ,type-check-Lvar)
+     ("remove complex opera*" ,remove-complex-opera* ,interp-Lvar ,type-check-Lvar)
+     ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
+     ("instruction selection", select-instructions, interp-pseudo-x86-0)
+     ("assign homes", assign-homes, interp-x86-0)
+     ("patch instructions" ,patch-instructions, interp-x86-0) 
+     ;;("prelude and conclusion",prelude-and-conclusion,interp-x86-0)
+     ))

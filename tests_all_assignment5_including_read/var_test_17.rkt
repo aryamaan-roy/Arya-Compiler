@@ -1,0 +1,1 @@
+(- (read) (let ([x (read)]) (- x (read))))
